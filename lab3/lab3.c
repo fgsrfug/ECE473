@@ -14,6 +14,7 @@
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <util/delay.h>
+#include <stddef.h>
 
 //holds data to be sent to the segments. logic zero turns segment on
 uint8_t segment_data[4]; 
@@ -69,7 +70,7 @@ int8_t debounce_switch(uint8_t button) {
 //Pass in the integer to be converted to hex and it returns the appropriate value in
 //the array.
 uint8_t dec_to_bcd(uint16_t num) {
-    uint8_t bcd_array[10] = {0b11000000, 0b11111001, 0b10100100, 0b10110000, 0b10011001, 0b10010010, 0b10000010, 0b11111000, 0b10000000, 0b10011000};
+    uint8_t bcd_array[11] = {0b11000000, 0b11111001, 0b10100100, 0b10110000, 0b10011001, 0b10010010, 0b10000010, 0b11111000, 0b10000000, 0b10011000, 0b11111111};
 
     return bcd_array[num];
 }
@@ -82,53 +83,31 @@ uint8_t dec_to_bcd(uint16_t num) {
 // onto the display.
 // Does not return anything.
 //*******************************************************************************
-void display_sum(int digits) {
-
-    //Determines how many digits to turn on
-    switch (digits){
-        case 4: PORTB = 0x00;
-                PORTA = dec_to_bcd(segment_data[0]);
-                _delay_ms(1);
-                PORTA = 0xFF;
-                PORTB = 0x10;
-                PORTA = dec_to_bcd(segment_data[1]);
-                _delay_ms(1);     
-                PORTA = 0xFF;
-                PORTB = 0x30;
-                PORTA = dec_to_bcd(segment_data[2]);
-                _delay_ms(1);     
-                PORTA = 0xFF;
-                PORTB = 0x40;
-                PORTA = dec_to_bcd(segment_data[3]);
-                _delay_ms(1);    
-                break;
-        case 3: PORTB = 0x00;
-                PORTA = dec_to_bcd(segment_data[0]);
-                _delay_ms(1); 
-                PORTA = 0xFF;
-                PORTB = 0x10;
-                PORTA = dec_to_bcd(segment_data[1]);
-                _delay_ms(1);    
-                PORTA = 0xFF;
-                PORTB = 0x30;
-                PORTA = dec_to_bcd(segment_data[2]);
-                _delay_ms(1);    
-                break;
-        case 2: PORTB = 0x00;
-                PORTA = dec_to_bcd(segment_data[0]);
-                _delay_ms(1);     
-                PORTA = 0xFF;
-                PORTB = 0x10;
-                PORTA = dec_to_bcd(segment_data[1]);
-                _delay_ms(1);    
-                break;
-        case 1: PORTB = 0x00;
-                PORTA = dec_to_bcd(segment_data[0]);
-                _delay_ms(2);     
-                break;
-    }
+void display_sum() {
+    
+    //Set digit_select to MSB
+    int8_t digit_select = 0x40;
+    
+    //Iterate through segment array
+    for (int i = 3; i >= 0; i--) {
+        //Select digit to turn on and send PORTA the BCD
+        PORTB = digit_select;
+        PORTA = dec_to_bcd(segment_data[i]);
+        _delay_ms(1);
+        PORTA = 0xFF;
+        
+        //Right shift digit_select and subtract 1 
+        digit_select = digit_select >> 4;
+        digit_select--;
+        
+        //Skip the colon
+        if (digit_select == 2){
+            digit_select --;
+        }    
+        //Right shift digit_select back
+        digit_select = digit_select << 4;
+    }                    
 }
-
 //***********************************************************************************
 //                                   segsum                                    
 //takes a 16-bit binary input value and places the appropriate equivalent 4 digit 
@@ -137,32 +116,25 @@ void display_sum(int digits) {
 //***********************************************************************************
 void segsum(uint16_t sum) {
 
-    uint8_t result, digits, i;
-    //determine how many digits there are
-    if (sum >= 1000){
-        digits = 4;
-    }
-    else if (sum >= 100){
-        digits = 3;
-    }  
-    else if (sum >= 10){
-        digits = 2;
-    }
-    else 
-        digits = 1;
-
-    for (i = 0; i < 4; i++){
-        segment_data[i] = 0;
-    }
+    uint8_t result, i;
 
     //break up decimal sum into 4 digit-segments
-    for (i = 0; i < digits; i++){
-        result = (sum % 10);
-        segment_data[i] = result;
-        sum = (sum / 10);
+    for (i = 0; i < 4; i++){
+        //if sum is less than 1, assign it 10 to turn off segments
+        if (sum < 1){
+            segment_data[i] = 10;
+        }
+        else {
+            //get the last digit of the current
+            result = (sum % 10);
+            //place that digit into the segment array
+            segment_data[i] = result;
+            //divide sum by 10 to get to next one's digit
+            sum = (sum / 10);
+        }
     }
 
-    display_sum(digits);
+    display_sum();
 
 }
 //***********************************************************************************
@@ -193,46 +165,141 @@ uint8_t spi_action(uint8_t mode_disp){
 // as well as mode_multiplier. This return value is passed directly into segsum.
 //***********************************************************************************
 int8_t encoder_adjuster(uint8_t enc_val){
-   
+
     //create a variable to store previous encoder values
     static uint8_t prev_enc_val = 0;
     //save state of enc_val
     uint8_t temp;
     temp = enc_val;
     //create counter to increment or decrement
-    int8_t counter = 0; 
+    int8_t counter = 0;
+    static uint8_t CW = TRUE;
+    static uint8_t dir_count = 0;
 
     //for loop checks both pairs of bits in the nibble for the encoders
     for (int i = 0; i < 2; i++){
-       //get either the high or low bits from the encoder
-       uint8_t current_bits = ((enc_val >> 2*i) & 0x03);
-            switch((prev_enc_val >> 2*i) & 0x03){
-                //compare the previous bits to the current bits to
-                //see if we are incrementing or decrementing
-                case 0b00: if (current_bits == 0b01) 
-                            counter -= mode_multiplier;
-                        if (current_bits == 0b10) 
-                            counter += mode_multiplier;
-                        break;
-                case 0b01: if (current_bits == 0b11) 
-                            counter -= mode_multiplier;
-                        if (current_bits == 0b00) 
-                            counter += mode_multiplier;
-                        break;
-                case 0b11: if (current_bits == 0b10) 
-                            counter -= mode_multiplier;
-                        if (current_bits == 0b01) 
-                            counter += mode_multiplier;
-                        break;
-                case 0b10: if (current_bits == 0b00) 
-                            counter -= mode_multiplier;
-                        if (current_bits == 0b11) 
-                            counter += mode_multiplier;
-                        break;
-                default:   break;
-            }
+        //get either the high or low bits from the encoder
+        uint8_t current_bits = ((enc_val >> 2*i) & 0x03);
+        switch((prev_enc_val >> 2*i) & 0x03){
+            //compare the previous bits to the current bits to
+            //see if we are incrementing or decrementing
+
+            case 0b00: if (current_bits == 0b01){ 
+                           if(CW == TRUE){
+                               dir_count++;
+                               if (dir_count == 4){
+                                   counter += mode_multiplier;
+                                   dir_count = 0;
+                               }
+                           }
+                           else {
+                               dir_count = 0;
+                               CW = FALSE;
+                           }
+                       }  
+                       if (current_bits == 0b10){
+                           if(CW == TRUE){
+                               dir_count++;
+                               if (dir_count == 4){
+                                   counter -= mode_multiplier;
+                                   dir_count = 0;
+                               }
+                           }
+                           else {
+                               dir_count = 0;
+                               CW = FALSE;
+                           }
+                       }
+                       break;
+            
+            case 0b01: if (current_bits == 0b11){ 
+                           if(CW == TRUE){
+                               dir_count++;
+                               if (dir_count == 4){
+                                   counter += mode_multiplier;
+                                   dir_count = 0;
+                               }
+                           }
+                           else {
+                               dir_count = 0;
+                               CW = FALSE;
+                           }
+                       }  
+                       if (current_bits == 0b00){
+                           if(CW == TRUE){
+                               dir_count++;
+                               if (dir_count == 4){
+                                   counter -= mode_multiplier;
+                                   dir_count = 0;
+                               }
+                           }
+                           else {
+                               dir_count = 0;
+                               CW = FALSE;
+                           }
+                       }
+                       break;
+            
+            case 0b11: if (current_bits == 0b10){ 
+                           if(CW == TRUE){
+                               dir_count++;
+                               if (dir_count == 4){
+                                   counter += mode_multiplier;
+                                   dir_count = 0;
+                               }
+                           }
+                           else {
+                               dir_count = 0;
+                               CW = FALSE;
+                           }
+                       }  
+                       if (current_bits == 0b01){
+                           if(CW == TRUE){
+                               dir_count++;
+                               if (dir_count == 4){
+                                   counter -= mode_multiplier;
+                                   dir_count = 0;
+                               }
+                           }
+                           else {
+                               dir_count = 0;
+                               CW = FALSE;
+                           }
+                       }
+                       break;
+            
+            case 0b10: if (current_bits == 0b00){ 
+                           if(CW == TRUE){
+                               dir_count++;
+                               if (dir_count == 4){
+                                   counter += mode_multiplier;
+                                   dir_count = 0;
+                               }
+                           }
+                           else {
+                               dir_count = 0;
+                               CW = FALSE;
+                           }
+                       }  
+                       if (current_bits == 0b11){
+                           if(CW == TRUE){
+                               dir_count++;
+                               if (dir_count == 4){
+                                   counter -= mode_multiplier;
+                                   dir_count = 0;
+                               }
+                           }
+                           else {
+                               dir_count = 0;
+                               CW = FALSE;
+                           }
+                       }
+                       break;
+            
+            default:   break;
+        }
     }
-    
+
     //set the soon-to-be previous encoder to temp, which held the current
     //encoder values.
     prev_enc_val = temp;
@@ -303,14 +370,9 @@ ISR(TIMER0_OVF_vect){
     //disable tristate buffer for pushbutton switches
     PORTB = temp;
 
-    //bound the count to 0 - 1023
-    if(count > 1023){
-        count = 1;
-    }
-
     //break up the disp_value to 4, BCD digits in the array: call (segsum)
     DDRA = 0xFF;
-    
+
     //store values of spi_action and encoder_adjuster
     SPDR_val = spi_action(mode_multiplier);
     SPDR_adj = encoder_adjuster(SPDR_val);
@@ -319,6 +381,9 @@ ISR(TIMER0_OVF_vect){
     //bound the count to 0 - 1023
     if(count > 1023){
         count = 1;
+    }
+    if(count < 1){
+        count = 1023;
     }
     //send data out to display
     segsum(count);
