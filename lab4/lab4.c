@@ -15,23 +15,26 @@
 #include <avr/interrupt.h>
 #include <util/delay.h>
 #include <stddef.h>
+#include "hd44780.h"
+#include <stdbool.h>
+
 
 //holds data to be sent to the segments. logic zero turns segment on
 uint8_t segment_data[5]; 
 //variable holding the current mode
 enum mode {SET_ALARM, SET_CLOCK, SET_VOL, ALARM_HANDLER};
 static enum mode current_mode = SET_VOL;
-//variables for storing time
-static uint16_t seconds = 1;
-static uint16_t minutes = 0;
-static uint16_t hours = 0;
-static uint8_t  alarm_sounding = FALSE;
-static int8_t alarm_seconds = 10;
-static int8_t alarm_minutes = 10;
-static int8_t alarm_hours = 10;
-static int8_t clock_minutes = 0;
-static int8_t clock_hours = 0;
-static int8_t alarm_is_set = 0;
+//struct for storing time
+struct time {
+    uint8_t seconds;
+    uint8_t minutes;
+    uint8_t hours;
+};    
+
+volatile struct time alarm_clock = {0, 0, 0};
+volatile struct time clock = {0, 0, 12};
+static _Bool alarm_is_set = FALSE;
+static _Bool  alarm_sounding = FALSE;
 //*******************************************************************************
 //                            timer0_init                                  
 // Initialize the timer to be used to count up 1 second and run off the external
@@ -50,7 +53,7 @@ void timer0_init(){
 // audio output. Uses internal I/O clock with no prescale.
 //*******************************************************************************
 void timer1_init(){
-    TIMSK |= (1<<TOIE1);  //enable timer overflow and enable output compare A interrupts
+//    TIMSK |= (1<<TOIE1);  //enable timer overflow and enable output compare A interrupts
     TCCR1A |= (1<<WGM11) | (1<<WGM10);  //Set to fast PWM, 64 prescale 
     TCCR1B |= (1<<WGM12) | (1<<CS10) | (1<<CS11);              
     TCCR1C = 0x00;                      //No force compare
@@ -62,8 +65,7 @@ void timer1_init(){
 // duty cycle of PB7.
 //*******************************************************************************
 void timer2_init(){
-    //TIMSK |= (1<<OCIE2);             //output compare interrupt enabled
-    TCCR2 |= (1<<WGM20) |(1<<WGM21) | (1<<CS20) | (1<<COM21);  //Set to fast PWM, 1024 prescale
+    TCCR2 |= (1<<WGM20) |(1<<WGM21) | (1<<CS20) | (1<<COM21) | (1<<COM20);  //Set to fast PWM, 1024 prescale
 }
 //*******************************************************************************
 //*******************************************************************************
@@ -72,7 +74,6 @@ void timer2_init(){
 // and varies a voltage on the pin to increase or decrease the volume.
 //*******************************************************************************
 void timer3_init(){
-    //TIMSK |= (1<<TOIE1) | (1<<OCIE1A);  //enable timer overflow and enable output compare A interrupts
     TCCR3A |= (1<<COM3A1) | (1<<COM3A0) | (1<<WGM31) | (1<<WGM30);  //Set to fast PWM, no prescale 
     TCCR3B |= (1<<WGM32) | (1<<CS30);              
     TCCR3C = 0x00;                      //No force compare
@@ -138,17 +139,17 @@ uint8_t dec_to_bcd(uint16_t num) {
 // Sends values to the colon to blink at 1 second intervals. Called in
 // timer 0 overflow ISR.
 //*******************************************************************************
-int8_t blink_colon() {
+int8_t blink_colon(struct time *t) {
     
     //Declare boolean to determine whether the colon is on
     
     //Check to see if the colon is on and either turn on segments
     //or blank segments.
     //Toggle colon_on before leaving function
-    if (seconds % 2 == 0){
+    if (t->seconds % 2 == 0){
         return segment_data[2] = 11;
     }
-    else if (seconds % 2 == 1){
+    else if (t->seconds % 2 == 1){
         return segment_data[2] = 10;
     }
 }
@@ -187,7 +188,7 @@ void display_sum() {
 //BCD segment code in the array segment_data for display.                       
 //array is loaded at exit as:  |digit3|digit2|colon|digit1|digit0|
 //***********************************************************************************
-void segsum(uint8_t seconds, uint8_t minutes) {
+void segsum(int8_t minutes, int8_t hours) {
 
     uint8_t result, i;
 
@@ -195,19 +196,19 @@ void segsum(uint8_t seconds, uint8_t minutes) {
     for (i = 0; i < 5; i++){
         if (i < 2){
             //get the last digit of the current
-            result = (seconds % 10);
-            //place that digit into the segment array
-            segment_data[i] = result;
-            //divide sum by 10 to get to next one's digit
-            seconds = (seconds / 10);
-        }
-        else if (i > 2){
-            //get the last digit of the current
             result = (minutes % 10);
             //place that digit into the segment array
             segment_data[i] = result;
             //divide sum by 10 to get to next one's digit
-            minutes = (minutes / 10);
+           minutes = (minutes / 10);
+        }
+        else if (i > 2){
+            //get the last digit of the current
+            result = (hours % 10);
+            //place that digit into the segment array
+            segment_data[i] = result;
+            //divide sum by 10 to get to next one's digit
+            hours = (hours / 10);
         }
     }
     display_sum();
@@ -387,8 +388,8 @@ int8_t encoder_adjuster(uint8_t enc_val){
 //                            alarm_set                                  
 // Takes in a time, in seconds, that will pass until the alarm will go off..
 //*******************************************************************************
-
-void alarm_set (uint8_t secs, uint8_t mins, uint8_t hrs){
+/*
+void alarm_set (struct time *t){
     static int8_t count = 0;
     
     for (int i = 0; i < mins; i++){
@@ -402,23 +403,24 @@ void alarm_set (uint8_t secs, uint8_t mins, uint8_t hrs){
     secs--;
     alarm_is_set = secs;
 }
-
+*/
 //*******************************************************************************
 //                            mode_select                                  
 // Determines the current mode by checking which button was pressed recently pressed.
 // Returns an enum.
 //*******************************************************************************
-void mode_select(int button, enum mode cur_mode){
+void mode_select(int button, enum mode cur_mode, struct time *alarm){
 
-    
     //Test to see what button was pressed
     switch (button) {
         
         case 0: //SET_CLOCK handler 
+            //if we want to set the clock, we should stop it
             if (cur_mode == SET_VOL){            
                 TIMSK &= ~(1<<TOIE0);
                 current_mode = SET_CLOCK;
             } 
+            //if we're done setting the clock, we can start it
             else if (cur_mode == SET_CLOCK){            
                 TIMSK |= (1<<TOIE0);
                 current_mode = SET_VOL;
@@ -430,26 +432,34 @@ void mode_select(int button, enum mode cur_mode){
             } 
             else if (cur_mode == SET_ALARM){            
                 current_mode = SET_VOL;
+                clear_display();
+                string2lcd("ALARM SET");
+                alarm_is_set = TRUE;
             } 
             break;
         case 2: //snooze handler 
-            if (cur_mode == ALARM_HANDLER){
+            if (alarm_sounding){
                 //set alarm alarm time to 10 seconds
-                alarm_seconds = seconds + 10;
-                alarm_minutes = minutes;
-                alarm_hours = hours;
+                alarm->seconds = clock.seconds + 10;
+                alarm->minutes = clock.minutes;
+                alarm->hours = clock.hours;
+                TIMSK &= ~(1<<TOIE1);
+                alarm_sounding = FALSE;
                 ////alarm_set(alarm_seconds, alarm_minutes, alarm_hours);
                 //continue to ALARM_HANDLER to disable alarm
-                current_mode = ALARM_HANDLER;
+                current_mode = SET_VOL;
            }
-           else if (cur_mode != ALARM_HANDLER)
+           else if (alarm_sounding == FALSE)
                 current_mode = SET_VOL;
             break;
         case 3: //alarm off handler
-            if (cur_mode == ALARM_HANDLER){
-                current_mode = ALARM_HANDLER;
+            if (alarm_sounding){
+                TIMSK &= ~(1<<TOIE1);
+                alarm_sounding = FALSE;
+                alarm_is_set = FALSE;
+                current_mode = SET_VOL;
             }
-            else if (cur_mode != ALARM_HANDLER) 
+            else if (alarm_sounding == FALSE) 
                 current_mode = SET_VOL;
             break;
        
@@ -461,15 +471,29 @@ void mode_select(int button, enum mode cur_mode){
 
 //*******************************************************************************
 //                            clock_set                                  
-// Takes in a time, in seconds, that will be sent off to become the displayed time
+// Takes in the value from the encoders and use them to set the time struct
 //*******************************************************************************
 
-void clock_set (uint8_t mins, uint8_t hrs){
-    
-    minutes = mins;
-    hours = hrs;
+void clock_set (struct time *t, uint8_t enc_val){
+    t->minutes += enc_val;
+    if (t->minutes > 59){
+        t->hours++;
+        t->minutes = 0;
+    }
+    if (t->minutes < 0){
+        t->hours--;
+        t->minutes = 59;
+    }
 
+    if (t->hours > 23)
+        t->hours = 0;
+
+    if (t->hours < 0)
+        t->hours = 23;
+
+    //segsum(t->minutes, t->hours);
 }
+
 //***********************************************************************************
 //                            ISR(TIMER0_OVF_vect)                                  
 // ISR performed when timer 0 overflows. Determines when 1 second has
@@ -478,50 +502,47 @@ void clock_set (uint8_t mins, uint8_t hrs){
 //*******************************************************************************
 ISR(TIMER0_OVF_vect){
 
-    seconds++;
-    
+    clock.seconds++;
     //Increment seconds, minutes and hours when appropriate
     //clear each when they reach 60, 60 and 24 respectively.
-    if (seconds > 59){
-        minutes++;
-        seconds = 0;
+    if (clock.seconds > 59){
+        clock.minutes++;
+        clock.seconds = 0;
     }
 
-    if (minutes > 59){
-        hours++;
-        minutes = 0;
+    if (clock.minutes > 59){
+        clock.hours++;
+        clock.minutes = 0;
     }
 
-    if (hours > 23){
-        hours = 0;
+    if (clock.hours > 23){
+        clock.hours = 0;
     }
     
     //blink the colon
-    blink_colon();
+    blink_colon(&clock);
     
     //compare the current time to the set alarm
-    if((alarm_hours == hours) && (alarm_minutes == minutes) && (alarm_seconds == seconds));
+    if((clock.hours == alarm_clock.hours) && (clock.minutes == alarm_clock.minutes) && (clock.seconds == alarm_clock.seconds)){
+        TIMSK |= (1<<TOIE1);
         alarm_sounding = TRUE;
+    }
 }
 //***********************************************************************************
 //                            ISR(TIMER1_OVF_vect)                                  
 // Used in fast PWM mode to oscillate PC0 to sent alarm tone. 
 //*******************************************************************************
 ISR(TIMER1_OVF_vect){
-   if (alarm_sounding){ 
         PORTC ^= (1<<PC0);
-    }
-    else{
-        PORTC &= ~(1 <<PC0);
-        }
+        //PORTC &= ~(1 <<PC0);
 }
 //***********************************************************************************
 //                            ISR(ADC_vect)                                  
 // Used to extract ADC result and store in adc_result. 
 //*******************************************************************************
 ISR(ADC_vect){
-    //Set OCR2 to the ADC value divided by 4 to get more precision
-    OCR2 = (ADC / 4);
+    //Set OCR2 to the ADC value 
+    OCR2 =(ADC / 8) + 220;
     //Enable the next conversion
     ADCSRA |= (1<<ADSC);
 }
@@ -532,68 +553,41 @@ ISR(ADC_vect){
 void vol_adjust(int8_t encoder_change){
     
     //values to hold the return values of spi_action and encoder_adjuster, respectively.
-    //uint16_t upper_limit = 10251;       
-    //uint16_t lower_limit = 100;       
-    //uint16_t fifty_duty = 9727;       
+    uint16_t upper_limit = 1020;       
+    uint16_t lower_limit = 20;       
     
-    //multiply encoder_change by 32.75 to match the voltage steps for the
+    //multiply encoder_change by 20 to match the voltage steps for the
     //audio amp.
-    encoder_change = encoder_change * 33; 
-   /* 
+    encoder_change = encoder_change * 20; 
+    
     if(OCR3A + encoder_change > upper_limit) {
         OCR3A = upper_limit;
     }
     else if(OCR3A + encoder_change < lower_limit) {
         OCR3A = lower_limit;
     }
-    */
-    OCR3A += encoder_change;
-    /*
-    if(OCR3A > upper_limit){
-        OCR3A = upper_limit;
-    }
-    else if (OCR3A < lower_limit){
-        OCR3A = lower_limit;
-    }
-
-   else 
-        OCR3A += (encoder_change);
-        */
+    
+    else
+        OCR3A += encoder_change;
 }
 //***********************************************************************************
 //                            mode_action()                                  
 // Depending on what the current mode is, we do the appropriate action.
 //*******************************************************************************
-void mode_action(enum mode cur_mode, uint8_t encoder_change){
+void mode_action(enum mode cur_mode, uint8_t encoder_change, struct time *t, struct time *alarm){
     switch (cur_mode){
         case 0: //setting an alarm
-            alarm_minutes += encoder_change;
-            if (alarm_minutes > 59){
-                alarm_hours++;
-                alarm_minutes = alarm_minutes % 60; 
-            }
-            clear_display();
-            string2lcd("ALARM SET");
-           // segsum(alarm_minutes, alarm_hours);
+            clock_set(alarm, encoder_change);
+            //segsum(alarm_clock.minutes, alarm_clock.hours);
             break;
         case 1: //setting a new time
-            clock_minutes += encoder_change;
-            if (clock_minutes > 59){
-                clock_hours++;
-                clock_minutes = clock_minutes % 60;
-            }
-            clear_display();
-            string2lcd("TIME SET");
-            clock_set(clock_minutes, clock_hours);
-           // segsum(alarm_seconds, alarm_minutes);
+            clock_set(t, encoder_change);
+            //segsum(t);
             break;
         case 2: //adjusting the volume
             vol_adjust(encoder_change);
-            clear_display();
-            string2lcd("VOLUME ADJUST");
             break;
         case 3: //alarm handling
-            TIMSK &= ~(1<<TOIE1);
             clear_display();
             string2lcd("ALARMED DISABLED");
     }
@@ -618,6 +612,7 @@ uint8_t main() {
     timer3_init();
     adc_init();
     lcd_init();
+
     //Enable the interrupts
     sei();
 
@@ -640,7 +635,7 @@ uint8_t main() {
         //now check each button and pass that information to mode_select
         for(int i = 0; i < 4; i++){
             if(debounce_switch(i)){
-               mode_select(i, current_mode);
+               mode_select(i, current_mode, &alarm_clock);
             }
         }
 
@@ -649,20 +644,24 @@ uint8_t main() {
 
         //break up the disp_value to 4, BCD digits in the array: call (segsum)
         DDRA = 0xFF;
-
-        //store values of spi_action and encoder_adjuster
-        SPDR_val = spi_action(current_mode);
+       
+        if (alarm_is_set){
+            //store values of spi_action and encoder_adjuster
+            SPDR_val = spi_action(clock.seconds | (1<<7));
+        }
+        else
+            SPDR_val = spi_action(clock.seconds);
         SPDR_adj = encoder_adjuster(SPDR_val);
         
         
-        mode_action(current_mode, SPDR_adj);
+        mode_action(current_mode, SPDR_adj, &clock, &alarm_clock);
 
         //send data out to display
-        if (current_mode == SET_CLOCK) 
-            segsum(clock_minutes, clock_hours);
+       if (current_mode == SET_CLOCK) 
+            segsum(clock.minutes, clock.hours);
         else if (current_mode == SET_VOL) 
-            segsum(minutes, hours);
-        else if (current_mode == SET_ALARM) 
-            segsum(alarm_minutes, alarm_hours);
+            segsum(clock.minutes, clock.hours);
+       else if (current_mode == SET_ALARM) 
+            segsum(alarm_clock.minutes, alarm_clock.hours);
     }
 }
